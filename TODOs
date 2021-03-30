@@ -4,3 +4,7 @@ Dataset:
 Algorithms:
 # sequence method
 
+Features:
+- [ ] save_best for model fitting
+- [ ] early_stop for model fitting
+- [ ] support tensorboard

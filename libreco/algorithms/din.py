@@ -10,20 +10,21 @@ import os
 from itertools import islice
 import numpy as np
 import pandas as pd
-import tensorflow.compat.v1 as tf
+import tensorflow as tf2
 from tensorflow.keras.initializers import (
     truncated_normal as tf_truncated_normal
 )
 from .base import Base, TfMixin
+from ..data.data_generator import DataGenSequence
+from ..data.sequence import user_last_interacted
 from ..evaluation.evaluate import EvalMixin
 from ..utils.tf_ops import (
     reg_config,
     dropout_config,
     dense_nn,
-    lr_decay_config
+    lr_decay_config,
+    multi_sparse_combine_embedding
 )
-from ..data.data_generator import DataGenSequence
-from ..data.sequence import user_last_interacted
 from ..utils.misc import time_block, colorize
 from ..utils.misc import count_params
 from ..feature import (
@@ -32,6 +33,7 @@ from ..feature import (
     features_from_dict,
     add_item_features
 )
+tf = tf2.compat.v1
 tf.disable_v2_behavior()
 
 
@@ -58,6 +60,7 @@ class DIN(Base, TfMixin, EvalMixin):
             recent_num=10,
             random_num=None,
             use_tf_attention=False,
+            multi_sparse_combiner="sqrtn",
             seed=42,
             lower_upper_bound=None,
             tf_sess_config=None
@@ -92,6 +95,10 @@ class DIN(Base, TfMixin, EvalMixin):
         if self.sparse:
             self.sparse_feature_size = self._sparse_feat_size(data_info)
             self.sparse_field_size = self._sparse_field_size(data_info)
+            self.multi_sparse_combiner = self._check_multi_sparse(
+                data_info, multi_sparse_combiner)
+            self.true_sparse_field_size = self._true_sparse_field_size(
+                data_info, self.sparse_field_size, self.multi_sparse_combiner)
         if self.dense:
             self.dense_field_size = self._dense_field_size(data_info)
         self.item_sparse = (
@@ -185,17 +192,38 @@ class DIN(Base, TfMixin, EvalMixin):
         self.item_embed.append(item_embed)
 
     def _build_sparse(self):
-        sparse_embed = tf.nn.embedding_lookup(
-            self.sparse_feat, self.sparse_indices)
-        self.concat_embed.append(tf.reshape(
-            sparse_embed, [-1, self.sparse_field_size * self.embed_size])
-        )
+        sparse_embed = tf.nn.embedding_lookup(self.sparse_feat, self.sparse_indices)
+
+        if (self.data_info.multi_sparse_combine_info
+                and self.multi_sparse_combiner in ("sum", "mean", "sqrtn")):
+            multi_sparse_embed = multi_sparse_combine_embedding(
+                self.data_info, self.sparse_feat, self.sparse_indices,
+                self.multi_sparse_combiner, self.embed_size
+            )
+            self.concat_embed.append(tf.reshape(
+                multi_sparse_embed, [-1, self.true_sparse_field_size * self.embed_size])
+            )
+        else:
+            self.concat_embed.append(tf.reshape(
+                sparse_embed, [-1, self.sparse_field_size * self.embed_size])
+            )
 
         if self.item_sparse:
             item_sparse_embed = tf.layers.flatten(
                 tf.gather(sparse_embed, self.item_sparse_col_indices, axis=1)
             )
             self.item_embed.append(item_sparse_embed)
+
+        # sparse_embed = tf.nn.embedding_lookup(
+        #    self.sparse_feat, self.sparse_indices)
+        # self.concat_embed.append(tf.reshape(
+        #    sparse_embed, [-1, self.sparse_field_size * self.embed_size])
+        # )
+        # if self.item_sparse:
+        #    item_sparse_embed = tf.layers.flatten(
+        #        tf.gather(sparse_embed, self.item_sparse_col_indices, axis=1)
+        #    )
+        #    self.item_embed.append(item_sparse_embed)
 
     def _build_dense(self):
         batch_size = tf.shape(self.dense_values)[0]
@@ -437,7 +465,7 @@ class DIN(Base, TfMixin, EvalMixin):
             if cold_start == "average":
                 user_id = self.n_users
             elif cold_start == "popular":
-                return self.data_info.popular_items[:n_rec]
+                return self.popular_recommends(inner_id, n_rec)
             else:
                 raise ValueError(user)
 

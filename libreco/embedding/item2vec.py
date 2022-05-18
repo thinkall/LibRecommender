@@ -8,11 +8,11 @@ author: massquantity
 """
 import os
 import warnings
-warnings.filterwarnings("ignore")
 from gensim.models import Word2Vec
 from tqdm import tqdm
 import numpy as np
 from ..utils.misc import time_block, colorize
+warnings.filterwarnings("ignore")
 
 
 class Item2Vec(object):
@@ -36,16 +36,16 @@ class Item2Vec(object):
 
     def fit(self, n_threads=0, verbose=1):
         data = ItemCorpus(self.data_info.user_consumed)
-        with time_block(f"gensim word2vec training", verbose):
+        with time_block("gensim word2vec training", verbose):
             model = Word2Vec(
                 sentences=data,
-                size=self.embed_size,
+                vector_size=self.embed_size,
                 window=self.window_size,
                 sg=1,
                 hs=0,
                 negative=5,
                 seed=self.seed,
-                iter=5,
+                epochs=5,
                 min_count=1,
                 workers=os.cpu_count() if not n_threads else n_threads,
                 sorted_vocab=0

@@ -1,4 +1,3 @@
-import numpy as np
 import pandas as pd
 from libreco.data import split_by_ratio_chrono, DatasetFeat
 from libreco.algorithms import YouTubeRanking
@@ -57,5 +56,3 @@ if __name__ == "__main__":
     print("cold recommendation: ", ytb_ranking.recommend_user(user="are we good?",
                                                               n_rec=7,
                                                               cold_start="popular"))
-
-

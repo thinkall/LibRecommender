@@ -10,19 +10,20 @@ from itertools import islice
 import os
 import numpy as np
 import pandas as pd
-import tensorflow.compat.v1 as tf
+import tensorflow as tf2
 from tensorflow.keras.initializers import (
     truncated_normal as tf_truncated_normal
 )
 from .base import Base, TfMixin
+from ..data.data_generator import DataGenFeat
 from ..evaluation.evaluate import EvalMixin
 from ..utils.tf_ops import (
     reg_config,
     dropout_config,
     dense_nn,
-    lr_decay_config
+    lr_decay_config,
+    multi_sparse_combine_embedding
 )
-from ..data.data_generator import DataGenFeat
 from ..utils.sampling import NegativeSampling
 from ..utils.misc import count_params
 from ..feature import (
@@ -31,6 +32,7 @@ from ..feature import (
     features_from_dict,
     add_item_features
 )
+tf = tf2.compat.v1
 tf.disable_v2_behavior()
 
 
@@ -55,6 +57,7 @@ class DeepFM(Base, TfMixin, EvalMixin):
             dropout_rate=None,
             hidden_units="128,64,32",
             batch_sampling=False,
+            multi_sparse_combiner="sqrtn",
             seed=42,
             lower_upper_bound=None,
             tf_sess_config=None
@@ -85,6 +88,10 @@ class DeepFM(Base, TfMixin, EvalMixin):
         if self.sparse:
             self.sparse_feature_size = self._sparse_feat_size(data_info)
             self.sparse_field_size = self._sparse_field_size(data_info)
+            self.multi_sparse_combiner = self._check_multi_sparse(
+                data_info, multi_sparse_combiner)
+            self.true_sparse_field_size = self._true_sparse_field_size(
+                data_info, self.sparse_field_size, self.multi_sparse_combiner)
         if self.dense:
             self.dense_field_size = self._dense_field_size(data_info)
         self.all_args = locals()
@@ -183,13 +190,23 @@ class DeepFM(Base, TfMixin, EvalMixin):
             initializer=tf_truncated_normal(0.0, 0.01),
             regularizer=self.reg)
 
-        linear_sparse_embed = tf.nn.embedding_lookup(    # B * F1
-            linear_sparse_feat, self.sparse_indices)
-        pairwise_sparse_embed = tf.nn.embedding_lookup(  # B * F1 * K
-            embed_sparse_feat, self.sparse_indices)
+        if (self.data_info.multi_sparse_combine_info
+                and self.multi_sparse_combiner in ("sum", "mean", "sqrtn")):
+            linear_sparse_embed = multi_sparse_combine_embedding(
+                self.data_info, linear_sparse_feat, self.sparse_indices,
+                self.multi_sparse_combiner, 1)
+            pairwise_sparse_embed = multi_sparse_combine_embedding(
+                self.data_info, embed_sparse_feat, self.sparse_indices,
+                self.multi_sparse_combiner, self.embed_size)
+        else:
+            linear_sparse_embed = tf.nn.embedding_lookup(    # B * F1
+                linear_sparse_feat, self.sparse_indices)
+            pairwise_sparse_embed = tf.nn.embedding_lookup(  # B * F1 * K
+                embed_sparse_feat, self.sparse_indices)
+
         deep_sparse_embed = tf.reshape(
             pairwise_sparse_embed,
-            [-1, self.sparse_field_size * self.embed_size]
+            [-1, self.true_sparse_field_size * self.embed_size]
         )
         self.linear_embed.append(linear_sparse_embed)
         self.pairwise_embed.append(pairwise_sparse_embed)
@@ -331,7 +348,7 @@ class DeepFM(Base, TfMixin, EvalMixin):
             if cold_start == "average":
                 user_id = self.n_users
             elif cold_start == "popular":
-                return self.data_info.popular_items[:n_rec]
+                return self.popular_recommends(inner_id, n_rec)
             else:
                 raise ValueError(user)
 

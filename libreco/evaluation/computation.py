@@ -1,3 +1,4 @@
+import numbers
 import numpy as np
 from tqdm import tqdm
 from ..data import TransformedSet
@@ -86,7 +87,8 @@ def compute_recommends(model, users, k):
     no_rec_users = []
     for u in tqdm(users, desc="eval_rec"):
         reco = model.recommend_user(u, k, inner_id=True)
-        if not reco or reco == -1:   # user_cf
+        # user_cf popular
+        if not reco or isinstance(reco[0], numbers.Real):
             # print("no recommend user: ", u)
             no_rec_num += 1
             no_rec_users.append(u)
@@ -100,8 +102,9 @@ def compute_recommends(model, users, k):
 
 
 def choose_pred_func(model):
-    pure_models = ["SVD", "SVDpp", "ALS", "BPR", "NCF", "YouTubeMatch",
-                   "Caser", "RNN4Rec", "WaveNet"]
+    pure_models = ["SVD", "SVDpp", "ALS", "BPR", "NCF", "YouTuBeRetrieval",
+                   "Caser", "RNN4Rec", "WaveNet", "UserCF", "ItemCF",
+                   "KnnEmbedding", "KnnEmbeddingApproximate"]
     if model.__class__.__name__ in pure_models:
         pred_func = predict_pure
     else:
@@ -112,7 +115,11 @@ def choose_pred_func(model):
 def predict_pure(model, transformed_data, batch_slice):
     user_indices, item_indices, labels, _, _ = transformed_data[batch_slice]
     preds = model.predict(user_indices, item_indices, inner_id=True)
-    return preds.tolist() if isinstance(preds, np.ndarray) else [preds]
+    if isinstance(preds, np.ndarray):
+        preds = preds.tolist()
+    elif not isinstance(preds, list):
+        preds = [preds]
+    return preds
 
 
 def predict_tf_feat(model, transformed_data, batch_slice):
@@ -123,6 +130,7 @@ def predict_tf_feat(model, transformed_data, batch_slice):
         sparse_indices,
         dense_values
     ) = transformed_data[batch_slice]
+
     if hasattr(model, "user_last_interacted"):
         feed_dict = model._get_seq_feed_dict(
             model.user_last_interacted[user_indices],

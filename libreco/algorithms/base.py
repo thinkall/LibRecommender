@@ -183,9 +183,9 @@ class Base(abc.ABC):
     @staticmethod
     def _check_has_sampled(data, verbose):
         if not data.has_sampled and verbose > 1:
-            exception_str = (f"During training, "
-                             f"one must do whole data sampling "
-                             f"before evaluating on epochs.")
+            exception_str = ("During training, "
+                             "one must do whole data sampling "
+                             "before evaluating on epochs.")
             raise NotSamplingError(f"{colorize(exception_str, 'red')}")
 
     @staticmethod
@@ -229,6 +229,34 @@ class Base(abc.ABC):
     @staticmethod
     def _dense_field_size(data_info):
         return len(data_info.dense_col.name)
+
+    @staticmethod
+    def _check_multi_sparse(data_info, multi_sparse_combiner):
+        if data_info.multi_sparse_combine_info and multi_sparse_combiner is not None:
+            if multi_sparse_combiner not in ("normal", "sum", "mean", "sqrtn"):
+                raise ValueError(f"unsupported multi_sparse_combiner type: "
+                                 f"{multi_sparse_combiner}")
+            else:
+                combiner = multi_sparse_combiner
+        else:
+            combiner = "normal"
+        return combiner
+
+    @staticmethod
+    def _true_sparse_field_size(data_info, sparse_field_size, combiner):
+        # When using multi_sparse_combiner, field size will decrease.
+        if data_info.multi_sparse_combine_info and combiner in ("sum", "mean", "sqrtn"):
+            field_length = data_info.multi_sparse_combine_info.field_len
+            return sparse_field_size - (sum(field_length) - len(field_length))
+        else:
+            return sparse_field_size
+
+    def popular_recommends(self, inner_id, n_rec):
+        if not inner_id:
+            return self.data_info.popular_items[:n_rec]
+        else:
+            top_populars = self.data_info.popular_items[:n_rec]
+            return [self.data_info.item2id[i] for i in top_populars]
 
     @staticmethod
     def show_start_time():
@@ -312,7 +340,7 @@ class TfMixin(object):
 
                 self.print_metrics(eval_data=eval_data, metrics=metrics,
                                    **kwargs)
-                print("="*30)
+                print("=" * 30)
 
     def train_feat(self, data_generator, verbose, shuffle, eval_data, metrics,
                    **kwargs):
@@ -337,7 +365,7 @@ class TfMixin(object):
                 print(f"\t {colorize(train_loss_str, 'green')}")
                 self.print_metrics(eval_data=eval_data, metrics=metrics,
                                    **kwargs)
-                print("="*30)
+                print("=" * 30)
 
     def train_seq(self):
         pass  # TODO: combine train_feat and train_seq
@@ -461,6 +489,9 @@ class TfMixin(object):
                 sparse_oovs = self.data_info.sparse_oov
                 start = 0
                 for oov in sparse_oovs:
+                    # multi_sparse case
+                    if start >= oov:
+                        continue
                     mean_tensor = tf.reduce_mean(
                         tf.gather(v, tf.range(start, oov)),
                         axis=0, keepdims=True
@@ -473,7 +504,7 @@ class TfMixin(object):
         self.sess.run(update_ops)
 
     def save_tf_model(self, path, model_name):
-        model_path = os.path.join(path,  model_name)
+        model_path = os.path.join(path, model_name)
         saver = tf.train.Saver()
         saver.save(self.sess, model_path, write_meta_graph=True)
 
@@ -562,12 +593,13 @@ class TfMixin(object):
                 old_var = variables[v.name]
                 # remove oov values
                 old_var = np.delete(
-                    old_var, self.data_info.old_sparse_oov,axis=0
+                    old_var, self.data_info.old_sparse_oov, axis=0
                 )
                 indices = []
                 for offset, size in zip(self.data_info.sparse_offset,
                                         self.data_info.old_sparse_len):
-                    indices.extend(range(offset, offset + size))
+                    if size != -1:
+                        indices.extend(range(offset, offset + size))
                 sparse_op = tf.IndexedSlices(old_var, indices)
                 update_ops.append(v.scatter_update(sparse_op))
 
@@ -599,7 +631,7 @@ class TfMixin(object):
                     update_ops.append(v.scatter_update(user_op))
 
                 elif (optimizer_item_variables is not None
-                          and v.name in optimizer_item_variables):
+                      and v.name in optimizer_item_variables):
                     old_var = (
                         variables[v.name]
                         if self.vector_infer
@@ -609,7 +641,7 @@ class TfMixin(object):
                     update_ops.append(v.scatter_update(item_op))
 
                 elif (optimizer_sparse_variables is not None
-                          and v.name in optimizer_sparse_variables):
+                      and v.name in optimizer_sparse_variables):
                     old_var = variables[v.name]
                     # remove oov values
                     old_var = np.delete(
@@ -618,17 +650,22 @@ class TfMixin(object):
                     indices = []
                     for offset, size in zip(self.data_info.sparse_offset,
                                             self.data_info.old_sparse_len):
-                        indices.extend(range(offset, offset + size))
+                        if size != -1:
+                            indices.extend(range(offset, offset + size))
                     sparse_op = tf.IndexedSlices(old_var, indices)
                     update_ops.append(v.scatter_update(sparse_op))
 
                 elif (optimizer_dense_variables is not None
-                          and v.name in optimizer_dense_variables):
+                      and v.name in optimizer_dense_variables):
                     old_var = variables[v.name]
                     update_ops.append(v.assign(old_var))
 
-                else:
+                elif v.name in variables:
                     old_var = variables[v.name]
+                    if list(old_var.shape) != v.get_shape().as_list():
+                        print(f"old and new shape of variable \"{v.name}\" "
+                              f"doesn't match, will be skipped.")
+                        continue
                     update_ops.append(v.assign(old_var))
 
         self.sess.run(update_ops)

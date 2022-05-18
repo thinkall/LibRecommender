@@ -11,10 +11,16 @@ tf.disable_v2_behavior()
 # https://www.zhihu.com/question/283715823
 # Also according to the discussions, it is generally NOT recommended to use
 # batch normalization and dropout simultaneously.
-def dense_nn(net, hidden_units, activation=tf.nn.elu, use_bn=True,
-             bn_after_activation=True, dropout_rate=None, is_training=True,
-             name="mlp"):
-    hidden_length = len(hidden_units)
+def dense_nn(
+        net,
+        hidden_units,
+        activation=tf.nn.elu,
+        use_bn=True,
+        bn_after_activation=True,
+        dropout_rate=None,
+        is_training=True,
+        name="mlp"
+):
     if activation is None:
         activation = tf.identity
 
@@ -22,11 +28,10 @@ def dense_nn(net, hidden_units, activation=tf.nn.elu, use_bn=True,
         if use_bn:
             net = tf.layers.batch_normalization(net, training=is_training)
         for i, units in enumerate(hidden_units, start=1):
-            # if i < hidden_length:
             net = tf.layers.dense(inputs=net,
                                   units=units,
                                   activation=None,
-                                  name=name+"_layer"+str(i),
+                                  name=name + "_layer" + str(i),
                                   reuse=tf.AUTO_REUSE)
 
             if use_bn and bn_after_activation:
@@ -192,13 +197,13 @@ def modify_variable_names(model, trainable):
     manual_var = None
     if trainable:
         if hasattr(model, "user_variables"):
-            user_var = [v+":0" for v in model.user_variables]
+            user_var = [v + ":0" for v in model.user_variables]
         if hasattr(model, "item_variables"):
-            item_var = [v+":0" for v in model.item_variables]
+            item_var = [v + ":0" for v in model.item_variables]
         if hasattr(model, "sparse_variables"):
-            sparse_var = [v+":0" for v in model.sparse_variables]
+            sparse_var = [v + ":0" for v in model.sparse_variables]
         if hasattr(model, "dense_variables"):
-            dense_var = [v+":0" for v in model.dense_variables]
+            dense_var = [v + ":0" for v in model.dense_variables]
 
         manual_var = []
         if user_var is not None:
@@ -241,3 +246,62 @@ def modify_variable_names(model, trainable):
                 dense_var.append(v + "/Ftrl_1:0")
 
     return user_var, item_var, sparse_var, dense_var, manual_var
+
+
+def multi_sparse_combine_embedding(data_info, variables, all_sparse_indices,
+                                   combiner, embed_size):
+    field_offsets = data_info.multi_sparse_combine_info.field_offset
+    field_lens = data_info.multi_sparse_combine_info.field_len
+    feat_oovs = data_info.multi_sparse_combine_info.feat_oov
+    sparse_end = field_offsets[0]
+
+    # only one multi_sparse feature and no sparse features
+    if sparse_end == 0 and len(field_offsets) == 1:
+        result = multi_sparse_alone(variables, all_sparse_indices,
+                                    combiner, embed_size, field_offsets[0],
+                                    field_lens[0], feat_oovs[0])
+    else:
+        if sparse_end > 0:
+            sparse_indices = all_sparse_indices[:, :sparse_end]
+            sparse_embedding = tf.nn.embedding_lookup(variables, sparse_indices)
+            result = [sparse_embedding]
+        else:
+            result = []
+
+        for offset, length, oov in zip(field_offsets, field_lens, feat_oovs):
+            result.append(
+                multi_sparse_alone(variables, all_sparse_indices, combiner,
+                                   embed_size, offset, length, oov)
+            )
+        result = tf.concat(result, axis=1)
+    return result
+
+
+def multi_sparse_alone(variables, all_sparse_indices, combiner,
+                       embed_size, offset, length, oov):
+    variable_dim = len(variables.get_shape().as_list())
+    # oov feats are padded to 0-vector
+    oov_indices = [oov] if variable_dim == 1 else oov
+    zero_padding_op = tf.scatter_update(
+        variables, oov_indices, tf.zeros([embed_size], dtype=tf.float32)
+    )
+    multi_sparse_indices = all_sparse_indices[:, offset: offset + length]
+
+    with tf.control_dependencies([zero_padding_op]):
+        multi_sparse_embed = tf.nn.embedding_lookup(variables, multi_sparse_indices)
+
+    res_embed = tf.reduce_sum(multi_sparse_embed, axis=1, keepdims=True)
+    if combiner in ("mean", "sqrtn"):
+        multi_sparse_lens = tf.reduce_sum(
+            tf.cast(
+                tf.not_equal(multi_sparse_indices, oov), tf.float32
+            ), axis=1, keepdims=True
+        )
+        if combiner == "sqrtn":
+            multi_sparse_lens = tf.sqrt(multi_sparse_lens)
+        if variable_dim == 2:
+            multi_sparse_lens = tf.expand_dims(multi_sparse_lens, axis=1)
+
+        res_embed = tf.div_no_nan(res_embed, multi_sparse_lens)
+
+    return res_embed
